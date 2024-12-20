@@ -110,6 +110,12 @@ pub struct Auth {
 
 impl Auth {
   pub fn login_url(&self) -> Signal<Option<String>> {
+    #[cfg(feature = "ssr")]
+    return signal(None).0.into();
+
+    let (code_verifier, set_code_verifier, remove_code_verifier) =
+      use_session_storage::<Option<String>, JsonSerdeCodec>(CODE_VERIFIER_KEY);
+
     let auth = self.clone();
     Signal::derive(move || {
       let (configuration, _) = auth.issuer.get()?;
@@ -128,11 +134,6 @@ impl Auth {
       if let Some(audience) = &auth.parameters.audience {
         params = params.push_param_query("audience", audience);
       }
-
-      let (code_verifier, set_code_verifier, remove_code_verifier) =
-        use_session_storage::<Option<String>, JsonSerdeCodec>(
-          CODE_VERIFIER_KEY,
-        );
 
       match &auth.parameters.challenge {
         Challenge::Sha256 | Challenge::Plain => {
@@ -167,6 +168,7 @@ impl Auth {
             );
         }
         Challenge::None => {
+          set_code_verifier.set(None);
           remove_code_verifier();
         }
       }
