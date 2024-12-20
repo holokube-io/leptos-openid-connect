@@ -31,25 +31,24 @@ use chrono::Local;
 use codee::string::JsonSerdeCodec;
 use error::AuthError;
 use jsonwebtoken::{
-  Algorithm, DecodingKey, TokenData, Validation, decode, jwk::Jwk,
+  decode, jwk::Jwk, Algorithm, DecodingKey, TokenData, Validation,
 };
 use leptos::prelude::*;
 use leptos_router::{
-  NavigateOptions,
   hooks::{use_navigate, use_query},
+  NavigateOptions,
 };
 use leptos_use::{
-  UseTimeoutFnReturn,
   storage::{use_local_storage, use_session_storage},
-  use_timeout_fn,
+  use_timeout_fn, UseTimeoutFnReturn,
 };
 use oauth2::{PkceCodeChallenge, PkceCodeVerifier};
 use response::{
   CallbackResponse, ErrorResponse, SuccessCallbackResponse,
   SuccessTokenResponse,
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use storage::{CODE_VERIFIER_KEY, LOCAL_STORAGE_KEY, TokenStorage};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use storage::{TokenStorage, CODE_VERIFIER_KEY, LOCAL_STORAGE_KEY};
 use utils::ParamBuilder;
 
 mod error;
@@ -106,6 +105,7 @@ pub struct Auth {
   parameters: AuthParameters,
   issuer: MaybeIssuer,
   auth: MaybeAuth,
+  redirect_uri: RwSignal<String>,
 }
 
 impl Auth {
@@ -119,7 +119,7 @@ impl Auth {
         .clone()
         .push_param_query("response_type", "code")
         .push_param_query("client_id", &auth.parameters.client_id)
-        .push_param_query("redirect_uri", &auth.parameters.redirect_uri)
+        .push_param_query("redirect_uri", &auth.redirect_uri.get_untracked())
         .push_param_query(
           "scope",
           auth.parameters.scope.clone().unwrap_or("openid".into()),
@@ -202,6 +202,10 @@ impl Auth {
 
   pub fn authenticated(&self) -> bool {
     self.auth.get().and_then(Result::ok).flatten().is_some()
+  }
+
+  pub fn set_redirect_uri(&self, uri: impl ToString) {
+    self.redirect_uri.set(uri.to_string());
   }
 
   pub fn id_token(&self) -> Signal<Option<String>> {
@@ -296,7 +300,9 @@ impl Auth {
 
 pub fn provide_auth(params: AuthParameters) {
   let issuer = run_openid_discovery(&params);
-  let (auth, set_auth) = create_auth_effect(issuer, params.clone());
+  let redirect_uri = RwSignal::new(params.redirect_uri.clone());
+  let (auth, set_auth) =
+    create_auth_effect(issuer, params.clone(), redirect_uri);
 
   create_handle_refresh_effect(params.clone(), issuer, auth, set_auth);
 
@@ -304,6 +310,7 @@ pub fn provide_auth(params: AuthParameters) {
     parameters: params,
     issuer,
     auth,
+    redirect_uri,
   };
   provide_context(auth);
 }
@@ -365,6 +372,7 @@ async fn get_jwks_keys(jwks_uri: &str) -> Result<Keys, reqwest::Error> {
 fn create_auth_effect(
   issuer: MaybeIssuer,
   params: AuthParameters,
+  redirect_uri: RwSignal<String>,
 ) -> (MaybeAuth, SetMaybeAuth) {
   let auth_query = use_query::<CallbackResponse>();
   let navigate = use_navigate();
@@ -386,12 +394,16 @@ fn create_auth_effect(
 
       match auth_query.get_untracked() {
         Ok(CallbackResponse::SuccessLogin(response)) => {
-          navigate(&params.redirect_uri, NavigateOptions {
-            resolve: false,
-            replace: true,
-            scroll: true,
-            state: leptos_router::location::State::new(None),
-          });
+          navigate(
+            &redirect_uri.get_untracked(),
+            NavigateOptions {
+              resolve: false,
+              replace: true,
+              scroll: true,
+              state: leptos_router::location::State::new(None),
+            },
+          );
+
           if let Some(token_storage) = local_storage {
             if token_storage.expires_in >= Local::now().naive_utc() {
               set_auth.set(Some(Ok(Some(token_storage))));
@@ -403,7 +415,9 @@ fn create_auth_effect(
             let params = params.clone();
             // let navigate = navigate.clone();
             async move {
-              let res = fetch_token(&params, &configuration, response).await;
+              let res =
+                fetch_token(&params, &configuration, response, redirect_uri)
+                  .await;
               match res {
                 Ok(token_storage) => {
                   set_local_storage
@@ -418,12 +432,15 @@ fn create_auth_effect(
           });
         }
         Ok(CallbackResponse::SuccessLogout(response)) => {
-          navigate(&params.post_logout_redirect_uri, NavigateOptions {
-            resolve: false,
-            replace: true,
-            scroll: true,
-            state: leptos_router::location::State::new(None),
-          });
+          navigate(
+            &params.post_logout_redirect_uri,
+            NavigateOptions {
+              resolve: false,
+              replace: true,
+              scroll: true,
+              state: leptos_router::location::State::new(None),
+            },
+          );
           if response.destroy_session {
             set_local_storage.set(None);
             remove_local_storage();
@@ -517,11 +534,12 @@ async fn fetch_token(
   parameters: &AuthParameters,
   configuration: &Configuration,
   auth_response: SuccessCallbackResponse,
+  redirect_uri: RwSignal<String>,
 ) -> Result<TokenStorage, AuthError> {
   let mut body = "&grant_type=authorization_code"
     .to_string()
     .push_param_body("client_id", &parameters.client_id)
-    .push_param_body("redirect_uri", &parameters.redirect_uri)
+    .push_param_body("redirect_uri", &redirect_uri.get_untracked())
     .push_param_body("code", &auth_response.code);
 
   if let Some(state) = &auth_response.session_state {
