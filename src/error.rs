@@ -52,4 +52,3 @@ pub enum AuthError {
   #[error("unable to initialize local storage")]
   Storage,
 }
-

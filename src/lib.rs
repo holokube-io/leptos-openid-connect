@@ -25,15 +25,18 @@
 
 #![cfg_attr(feature = "ssr", allow(unused, dead_code))]
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::Local;
 use codee::string::JsonSerdeCodec;
 use error::AuthError;
 use jsonwebtoken::{
-  decode, jwk::Jwk, Algorithm, DecodingKey, TokenData, Validation,
+  decode, decode_header, jwk::Jwk, Algorithm, DecodingKey, TokenData,
+  Validation,
 };
-use leptos::prelude::*;
+use jwt::Claims;
+use leptos::{logging::log, prelude::*};
 use leptos_router::{
   hooks::{use_navigate, use_query},
   NavigateOptions,
@@ -43,6 +46,7 @@ use leptos_use::{
   use_timeout_fn, UseTimeoutFnReturn,
 };
 use oauth2::{PkceCodeChallenge, PkceCodeVerifier};
+use reqwest::Client;
 use response::{
   CallbackResponse, ErrorResponse, SuccessCallbackResponse,
   SuccessTokenResponse,
@@ -50,6 +54,7 @@ use response::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use storage::{TokenStorage, CODE_VERIFIER_KEY, LOCAL_STORAGE_KEY};
 use utils::ParamBuilder;
+
 
 mod error;
 mod response;
@@ -613,4 +618,60 @@ async fn refresh_token(
       response.json::<ErrorResponse>().await.map_err(Arc::new)?,
     ))
   }
+}
+
+//////////////////////////////////////////////////
+//////////////////////////////////////////////////
+//////////////////////////////////////////////////
+//////////////////////////////////////////////////
+//////////////////////////////////////////////////
+//////////////////////////////////////////////////
+
+async fn fetch_jwks(
+  jwks_url: &str,
+) -> Result<Vec<Jwk>, Box<dyn std::error::Error>> {
+  let client = Client::new();
+  let response = client.get(jwks_url).send().await?;
+  let jwks = response.json::<Keys>().await?;
+  Ok(jwks.keys)
+}
+
+
+#[derive(Debug, Deserialize)]
+struct MyClaims {
+  sub: String, // User ID
+  exp: usize,  // Expiration timestamp
+               // Add other claim fields as needed
+}
+
+async fn verify_token(
+  token: &str,
+  jwks_uri: &str,
+) -> Result<String, AuthError> {
+  let jwks = fetch_jwks(&jwks_uri).await?;
+
+  // Decode the token header to get the `kid`
+  let header = decode_header(token).unwrap();
+  let kid = header.kid.ok_or("No kid in token header")?;
+
+  // Find the matching JWK
+  let jwk = jwks.iter().find(|jwk| jwk.common.key_id.unwrap().as_str() == kid).unwrap();
+
+
+  if let(Some(decoding_key)) = DecodingKey::from_jwk(jwk).ok() {
+    if let (Some(key_algorithm)) = jwk.common.key_algorithm {
+      if let (Some(algorithm)) = Algorithm::from_str(key_algorithm.to_string().as_str()).ok() {
+        let validation = Validation::new(algorithm);
+        let token_data: TokenData<Claims> =
+            decode(token, &decoding_key, &validation).unwrap();
+
+        // Step 7: Extract the user ID from the claims
+        Ok(token_data.claims.sub)
+      }
+    }
+  }
+  Err(AuthError::Provider(ErrorResponse {
+    error: "invalid_token".to_string(),
+    error_description: "Invalid token".to_string(),
+  }))
 }
